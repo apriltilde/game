@@ -1,4 +1,5 @@
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 #include <vector>
 #include <fstream>
 #include <iostream>
@@ -6,11 +7,13 @@
 #include <algorithm>
 #include <sstream>
 #include <string>
+#include <iomanip>
 
-const int GRID_SIZE = 32;
-const int SCREEN_WIDTH = 800;
+const int GRID_SIZE = 16;
+const int SCREEN_WIDTH = 1000; // Increased width for sidebar
 const int SCREEN_HEIGHT = 600;
 const float HIT_RADIUS = 6.0f;
+const int SIDEBAR_WIDTH = 200;
 
 struct Point {
     int x, y;
@@ -30,22 +33,48 @@ struct Sector {
 
 std::vector<Sector> sectors;
 std::vector<Point> currentWallPoints;
-std::string currentMapFilename = "../map.txt";  // Default save filename
+std::string currentMapFilename = "../map.txt";
+float newFloorHeight = 0.0f;
+float newCeilingHeight = 4.0f;
 
 SDL_Point gridSnap(int x, int y) {
-    return {
-        (x / GRID_SIZE) * GRID_SIZE,
-        (y / GRID_SIZE) * GRID_SIZE
-    };
+    return { (x / GRID_SIZE) * GRID_SIZE, (y / GRID_SIZE) * GRID_SIZE };
 }
 
 void drawGrid(SDL_Renderer* renderer) {
     SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
-    for (int x = 0; x < SCREEN_WIDTH; x += GRID_SIZE)
+    for (int x = 0; x < SCREEN_WIDTH - SIDEBAR_WIDTH; x += GRID_SIZE)
         SDL_RenderDrawLine(renderer, x, 0, x, SCREEN_HEIGHT);
     for (int y = 0; y < SCREEN_HEIGHT; y += GRID_SIZE)
-        SDL_RenderDrawLine(renderer, 0, y, SCREEN_WIDTH, y);
+        SDL_RenderDrawLine(renderer, 0, y, SCREEN_WIDTH - SIDEBAR_WIDTH, y);
 }
+
+void drawText(SDL_Renderer* renderer, TTF_Font* font, const std::string& text, int x, int y) {
+    SDL_Color color = {255, 255, 255};
+    SDL_Surface* surface = TTF_RenderText_Solid(font, text.c_str(), color);
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+    SDL_Rect dst = {x, y, surface->w, surface->h};
+    SDL_RenderCopy(renderer, texture, nullptr, &dst);
+    SDL_FreeSurface(surface);
+    SDL_DestroyTexture(texture);
+}
+
+void drawSidebar(SDL_Renderer* renderer, TTF_Font* font) {
+    SDL_Rect sidebar = {SCREEN_WIDTH - SIDEBAR_WIDTH, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT};
+    SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
+    SDL_RenderFillRect(renderer, &sidebar);
+
+    std::stringstream floorText, ceilingText;
+    floorText << "Floor: " << std::fixed << std::setprecision(1) << newFloorHeight;
+    ceilingText << "Ceiling: " << std::fixed << std::setprecision(1) << newCeilingHeight;
+
+    drawText(renderer, font, floorText.str(), SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 20);
+    drawText(renderer, font, ceilingText.str(), SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 50);
+
+    drawText(renderer, font, "[Up/Down] Floor", SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 100);
+    drawText(renderer, font, "[Right/Left] Ceiling", SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 130);
+}
+
 
 void drawWalls(SDL_Renderer* renderer, const std::vector<Wall>& walls) {
     for (const Wall& wall : walls) {
@@ -74,6 +103,8 @@ bool wallsExactlyMatch(const Wall& a, const Wall& b) {
 }
 
 
+const float GRID_TO_REAL_SCALE = 0.5f;  // adjust this to desired real size per grid
+
 void saveMap(const std::string& filename) {
     std::ofstream out(filename);
     if (!out) {
@@ -87,10 +118,10 @@ void saveMap(const std::string& filename) {
             << sec.floorHeight << " " << sec.ceilingHeight << "\n";
 
         for (const Wall& wall : sec.walls) {
-            out << wall.p1.x / GRID_SIZE << " "
-                << wall.p1.y / GRID_SIZE << " "
-                << wall.p2.x / GRID_SIZE << " "
-                << wall.p2.y / GRID_SIZE << " "
+            out << (wall.p1.x / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
+                << (wall.p1.y / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
+                << (wall.p2.x / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
+                << (wall.p2.y / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
                 << wall.isPortal << " "
                 << wall.adjoiningSector << "\n";
         }
@@ -99,6 +130,7 @@ void saveMap(const std::string& filename) {
 
     std::cout << "Map saved to " << filename << "\n";
 }
+
 
 bool loadMap(const char* filename) {
     std::ifstream in(filename);
@@ -131,15 +163,17 @@ bool loadMap(const char* filename) {
                 return false;
             }
             std::istringstream wallLine(line);
-            int x1, y1, x2, y2;
+            float x1f, y1f, x2f, y2f;
             int isPortalInt, adjoiningSector;
-            if (!(wallLine >> x1 >> y1 >> x2 >> y2 >> isPortalInt >> adjoiningSector)) {
+            if (!(wallLine >> x1f >> y1f >> x2f >> y2f >> isPortalInt >> adjoiningSector)) {
                 std::cerr << "Malformed wall line: " << line << "\n";
                 return false;
             }
             Wall w;
-            w.p1 = {x1 * GRID_SIZE, y1 * GRID_SIZE};
-            w.p2 = {x2 * GRID_SIZE, y2 * GRID_SIZE};
+            w.p1 = { static_cast<int>((x1f / GRID_TO_REAL_SCALE) * GRID_SIZE),
+                     static_cast<int>((y1f / GRID_TO_REAL_SCALE) * GRID_SIZE) };
+            w.p2 = { static_cast<int>((x2f / GRID_TO_REAL_SCALE) * GRID_SIZE),
+                     static_cast<int>((y2f / GRID_TO_REAL_SCALE) * GRID_SIZE) };
             w.isPortal = (isPortalInt != 0);
             w.adjoiningSector = adjoiningSector;
             sector.walls.push_back(w);
@@ -153,7 +187,6 @@ bool loadMap(const char* filename) {
     currentMapFilename = filename;  // Save loaded filename for later save
     return true;
 }
-
 float distanceToSegment(Point p, Point v, Point w) {
     float l2 = std::pow(w.x - v.x, 2) + std::pow(w.y - v.y, 2);
     if (l2 == 0.0f) return std::hypot(p.x - v.x, p.y - v.y);
@@ -311,11 +344,18 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (TTF_Init() != 0) {
+        std::cerr << "TTF_Init error: " << TTF_GetError() << std::endl;
+        SDL_Quit();
+        return 1;
+    }
+
     SDL_Window* window = SDL_CreateWindow("Grid Map Editor",
                                           SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                           SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
     if (!window) {
         std::cerr << "SDL_CreateWindow error: " << SDL_GetError() << std::endl;
+        TTF_Quit();
         SDL_Quit();
         return 1;
     }
@@ -324,6 +364,17 @@ int main(int argc, char* argv[]) {
     if (!renderer) {
         std::cerr << "SDL_CreateRenderer error: " << SDL_GetError() << std::endl;
         SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
+    TTF_Font* font = TTF_OpenFont("DejaVuSans.ttf", 16);
+    if (!font) {
+        std::cerr << "Failed to load font: " << TTF_GetError() << std::endl;
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
         SDL_Quit();
         return 1;
     }
@@ -343,59 +394,84 @@ int main(int argc, char* argv[]) {
             case SDL_QUIT:
                 running = false;
                 break;
+
             case SDL_MOUSEBUTTONDOWN:
-                if (event.button.button == SDL_BUTTON_LEFT) {
-                    SDL_Point snapped = gridSnap(event.button.x, event.button.y);
-                    currentWallPoints.push_back({snapped.x, snapped.y});
-                } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                    WallRef ref = findWallAt(event.button.x, event.button.y);
-                    if (ref.wall) {
-                        if (!ref.wall->isPortal) {
-                            ref.wall->isPortal = true;
-                            tryAutoLinkPortal(ref.wall, ref.sectorIndex);
-                        } else {
-                            int linkedSector = ref.wall->adjoiningSector;
-                            if (linkedSector >= 0 && linkedSector < (int)sectors.size()) {
-                                Sector& linkedSec = sectors[linkedSector];
-                                for (Wall& w : linkedSec.walls) {
-                                    if (w.adjoiningSector == ref.sectorIndex && w.isPortal) {
-                                        w.isPortal = false;
-                                        w.adjoiningSector = -1;
+                if (event.button.x < SCREEN_WIDTH - SIDEBAR_WIDTH) {
+                    if (event.button.button == SDL_BUTTON_LEFT) {
+                        SDL_Point snapped = gridSnap(event.button.x, event.button.y);
+                        currentWallPoints.push_back({snapped.x, snapped.y});
+                    } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                        WallRef ref = findWallAt(event.button.x, event.button.y);
+                        if (ref.wall) {
+                            if (!ref.wall->isPortal) {
+                                ref.wall->isPortal = true;
+                                tryAutoLinkPortal(ref.wall, ref.sectorIndex);
+                            } else {
+                                int linkedSector = ref.wall->adjoiningSector;
+                                if (linkedSector >= 0 && linkedSector < (int)sectors.size()) {
+                                    Sector& linkedSec = sectors[linkedSector];
+                                    for (Wall& w : linkedSec.walls) {
+                                        if (w.adjoiningSector == ref.sectorIndex && w.isPortal) {
+                                            w.isPortal = false;
+                                            w.adjoiningSector = -1;
+                                        }
                                     }
                                 }
+                                ref.wall->isPortal = false;
+                                ref.wall->adjoiningSector = -1;
+                                std::cout << "Portal unset on both sides.\n";
                             }
-                            ref.wall->isPortal = false;
-                            ref.wall->adjoiningSector = -1;
-                            std::cout << "Portal unset on both sides.\n";
                         }
                     }
                 }
                 break;
+
             case SDL_KEYDOWN:
-                if (event.key.keysym.sym == SDLK_RETURN && currentWallPoints.size() > 2) {
-                    Sector newSector;
-                    for (size_t i = 0; i < currentWallPoints.size(); ++i) {
-                        Point p1 = currentWallPoints[i];
-                        Point p2 = currentWallPoints[(i + 1) % currentWallPoints.size()];
-                        newSector.walls.push_back({p1, p2});
+                switch (event.key.keysym.sym) {
+                case SDLK_RETURN:
+                    if (currentWallPoints.size() > 2) {
+                        Sector newSector;
+                        newSector.floorHeight = newFloorHeight;
+                        newSector.ceilingHeight = newCeilingHeight;
+                        for (size_t i = 0; i < currentWallPoints.size(); ++i) {
+                            Point p1 = currentWallPoints[i];
+                            Point p2 = currentWallPoints[(i + 1) % currentWallPoints.size()];
+                            newSector.walls.push_back({p1, p2});
+                        }
+                        sectors.push_back(newSector);
+                        currentWallPoints.clear();
+                        std::cout << "Sector created. Total sectors: " << sectors.size() << "\n";
                     }
-                    sectors.push_back(newSector);
-                    currentWallPoints.clear();
-                    std::cout << "Sector created. Total sectors: " << sectors.size() << "\n";
-                }
-                else if (event.key.keysym.sym == SDLK_s) {
+                    break;
+                case SDLK_s:
                     saveMap(currentMapFilename);
-                }
-                else if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    break;
+                case SDLK_ESCAPE:
                     running = false;
-                }
-                else if (event.key.keysym.sym == SDLK_d) {
+                    break;
+                case SDLK_UP:
+                    newFloorHeight += 0.5f;
+                    break;
+                case SDLK_DOWN:
+                    newFloorHeight -= 0.5f;
+                    break;
+                case SDLK_RIGHT:
+                    newCeilingHeight += 0.5f;
+                    break;
+                case SDLK_LEFT:
+                    newCeilingHeight -= 0.5f;
+                    break;
+                case SDLK_d: {
                     int mx, my;
                     SDL_GetMouseState(&mx, &my);
-                    int hovered = findHoveredSector(mx, my);
-                    if (hovered >= 0) {
-                        deleteSector(hovered);
+                    if (mx < SCREEN_WIDTH - SIDEBAR_WIDTH) {
+                        int hovered = findHoveredSector(mx, my);
+                        if (hovered >= 0) {
+                            deleteSector(hovered);
+                        }
                     }
+                    break;
+                }
                 }
                 break;
             }
@@ -408,15 +484,18 @@ int main(int argc, char* argv[]) {
         for (const Sector& s : sectors)
             drawWalls(renderer, s.walls);
         drawCurrent(renderer);
+        drawSidebar(renderer, font);
 
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
     }
 
+    TTF_CloseFont(font);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    TTF_Quit();
     SDL_Quit();
 
     return 0;
 }
-
+ 

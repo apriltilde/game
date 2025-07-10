@@ -5,7 +5,6 @@
 #include <limits>
 #include "helpers.h"
 
-
 using namespace std;
 
 const int SCREEN_WIDTH = 1080;
