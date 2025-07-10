@@ -10,11 +10,6 @@
 
 using namespace std;
 
-// Minimap size
-const int MINIMAP_SIZE = 150;
-const int MINIMAP_MARGIN = 10;
-const double MINIMAP_SCALE = 5.0; // World units to minimap pixels
-
 struct Wall {
     double x1, y1, x2, y2;
     bool isPortal;
@@ -62,7 +57,10 @@ bool intersectRayWithSegment(double rayX, double rayY, double rayDX, double rayD
 }
 
 int getSectorForPosition(double x, double y) {
-    for (int i = 0; i < sectors.size(); ++i) {
+    int bestSector = -1;
+    double highestFloor = -1e9; // very low initial value
+
+    for (int i = 0; i < (int)sectors.size(); ++i) {
         const Sector& sector = sectors[i];
         int crossings = 0;
         for (const Wall& wall : sector.walls) {
@@ -70,14 +68,20 @@ int getSectorForPosition(double x, double y) {
             double x2 = wall.x2, y2 = wall.y2;
 
             if (((y1 > y) != (y2 > y)) &&
-                (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-6) + x1)) {
+                (x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-10) + x1)) {
                 crossings++;
             }
         }
-        if (crossings % 2 == 1) return i;
+        if (crossings % 2 == 1) {
+            if (sector.floorHeight > highestFloor) {
+                highestFloor = sector.floorHeight;
+                bestSector = i;
+            }
+        }
     }
-    return -1;
+    return bestSector;
 }
+
 
 double pointToSegmentDistance(double px, double py, double x1, double y1, double x2, double y2) {
     double dx = x2 - x1;
@@ -106,20 +110,20 @@ double pointToSegmentDistance(double px, double py, double x1, double y1, double
 const double COLLISION_RADIUS = 0.1;
 
 bool isMovementBlocked(double newX, double newY) {
-    int sector = getSectorForPosition(newX, newY);
-    if (sector == -1) return true;
-
-    for (const Wall& wall : sectors[sector].walls) {
-        if (!wall.isPortal) {
-            double dist = pointToSegmentDistance(newX, newY, wall.x1, wall.y1, wall.x2, wall.y2);
-            if (dist < COLLISION_RADIUS) {
-                return true;
+    for (const Sector& sector : sectors) {
+        for (const Wall& wall : sector.walls) {
+            if (!wall.isPortal) {
+                double dist = pointToSegmentDistance(newX, newY, wall.x1, wall.y1, wall.x2, wall.y2);
+                if (dist < COLLISION_RADIUS) {
+                    return true;
+                }
             }
         }
     }
-
     return false;
 }
+
+
 
 void loadMapFromFile(const string& filename) {
     ifstream file(filename);
@@ -158,6 +162,12 @@ void loadMapFromFile(const string& filename) {
     file.close();
 }
 
+///DEBUGGING STUFF HERE
+
+// Minimap size
+const int MINIMAP_SIZE = 150;
+const int MINIMAP_MARGIN = 10;
+const double MINIMAP_SCALE = 5.0; // World units to minimap pixels
 
 void renderMinimap(SDL_Surface* surface) {
     // Draw minimap background (dark grey)
@@ -242,8 +252,7 @@ void renderMinimap(SDL_Surface* surface) {
     while (true) {
         if (cx >= MINIMAP_MARGIN && cx < MINIMAP_MARGIN + MINIMAP_SIZE &&
             cy >= MINIMAP_MARGIN && cy < MINIMAP_MARGIN + MINIMAP_SIZE) {
-            Uint32* pixels = (Uint32*)surface->pixels;
-            pixels[cy * (surface->pitch / 4) + cx] = playerColor;
+            
         }
         if (cx == x2 && cy == y2) break;
         e2 = 2 * err;

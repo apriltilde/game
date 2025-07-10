@@ -8,15 +8,14 @@
 
 using namespace std;
 
-const int SCREEN_WIDTH = 640;
-const int SCREEN_HEIGHT = 480;
+const int SCREEN_WIDTH = 1080;
+const int SCREEN_HEIGHT = 720;
 const double playerEyeHeightOffset = 1.0; 
 
 void renderFrame(SDL_Surface* surface) {
     int playerSector = getSectorForPosition(posX, posY);
     if (playerSector == -1) return;
 
-    const double playerEyeHeightOffset = 1.0;
     double playerHeight = sectors[playerSector].floorHeight + playerEyeHeightOffset;
 
     for (int x = 0; x < SCREEN_WIDTH; x++) {
@@ -26,23 +25,29 @@ void renderFrame(SDL_Surface* surface) {
 
         double rayX = posX, rayY = posY;
 
-        int currentSector = playerSector; // start raycasting in player's sector
         double totalDist = 0.0;
         const int MAX_PORTAL_DEPTH = 10;
 
-        Sector* sector = &sectors[currentSector];
+        int currentSector = playerSector;
 
+        // Instead of only one sector, we try to find closest wall in all sectors at each step
         for (int depth = 0; depth < MAX_PORTAL_DEPTH; ++depth) {
             double closestDist = numeric_limits<double>::infinity();
             Wall* hitWall = nullptr;
+            int hitSectorIndex = -1;
 
-            for (Wall& wall : sector->walls) {
-                double dist;
-                if (intersectRayWithSegment(rayX, rayY, rayDirX, rayDirY,
-                                            wall.x1, wall.y1, wall.x2, wall.y2, dist)) {
-                    if (dist < closestDist) {
-                        closestDist = dist;
-                        hitWall = &wall;
+            // Test ray against all sectors (not just currentSector)
+            for (int si = 0; si < (int)sectors.size(); si++) {
+                Sector* sector = &sectors[si];
+                for (Wall& wall : sector->walls) {
+                    double dist;
+                    if (intersectRayWithSegment(rayX, rayY, rayDirX, rayDirY,
+                                                wall.x1, wall.y1, wall.x2, wall.y2, dist)) {
+                        if (dist < closestDist) {
+                            closestDist = dist;
+                            hitWall = &wall;
+                            hitSectorIndex = si;
+                        }
                     }
                 }
             }
@@ -51,7 +56,7 @@ void renderFrame(SDL_Surface* surface) {
 
             totalDist += closestDist;
 
-            // Use fixed playerHeight here
+            Sector* sector = &sectors[hitSectorIndex];
             double floorHeight = sector->floorHeight;
             double ceilingHeight = sector->ceilingHeight;
 
@@ -81,12 +86,12 @@ void renderFrame(SDL_Surface* surface) {
 
             rayX += rayDirX * (closestDist + 0.01);
             rayY += rayDirY * (closestDist + 0.01);
+
             currentSector = hitWall->adjoiningSector;
             if (currentSector < 0 || currentSector >= (int)sectors.size()) break;
-            sector = &sectors[currentSector];
         }
     }
-
+	//DEBUGGING REMOVE LATER!
     renderMinimap(surface);
 }
 
@@ -109,13 +114,17 @@ int main(int argc, char* argv[]) {
 
     screenSurface = SDL_GetWindowSurface(window);
 
-	loadMapFromFile("map.txt");
+    if (argc >= 2) {
+        loadMapFromFile(argv[1]);
+    } else {
+        loadMapFromFile("map.txt");
+    }
 
     bool quit = false;
     SDL_Event e;
 
-    const double moveSpeed = 0.1;
-    const double rotSpeed = 0.05;
+    const double moveSpeed = 0.2;
+    const double rotSpeed = 0.1;
 
     while (!quit) {
         const Uint8* keystate = SDL_GetKeyboardState(NULL);
