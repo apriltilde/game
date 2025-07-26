@@ -1,377 +1,213 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <vector>
-#include <fstream>
-#include <iostream>
+#include <cstdio>
 #include <cmath>
-#include <algorithm>
-#include <sstream>
 #include <string>
-#include <iomanip>
-
-const int GRID_SIZE = 16;
-const int SCREEN_WIDTH = 1000; // Increased width for sidebar
-const int SCREEN_HEIGHT = 600;
-const float HIT_RADIUS = 6.0f;
-const int SIDEBAR_WIDTH = 200;
-
-struct Point {
-    int x, y;
-};
+#include <algorithm>
 
 struct Wall {
-    Point p1, p2;
+    float x1, y1, x2, y2;
     bool isPortal = false;
     int adjoiningSector = -1;
 };
 
 struct Sector {
+    int id;
     std::vector<Wall> walls;
-    float floorHeight = 0.0f;
-    float ceilingHeight = 4.0f;
+    float floor_height = 0.0f;
+    float ceiling_height = 4.0f;
 };
+
+static const int WINDOW_W = 800;
+static const int WINDOW_H = 600;
+static const float VERTEX_RADIUS = 5.0f;
+static const float CLOSE_DIST = 10.0f;
+static const float SNAP_DIST = 10.0f;
+static const float GRID_SIZE = 5.0f;
+
+SDL_Window* window = nullptr;
+SDL_Renderer* renderer = nullptr;
+TTF_Font* font = nullptr;
 
 std::vector<Sector> sectors;
-std::vector<Point> currentWallPoints;
-std::string currentMapFilename = "../map.txt";
-float newFloorHeight = 0.0f;
-float newCeilingHeight = 4.0f;
+std::vector<SDL_FPoint> currentVertices;
+int currentSectorId = 0;
 
-SDL_Point gridSnap(int x, int y) {
-    return { (x / GRID_SIZE) * GRID_SIZE, (y / GRID_SIZE) * GRID_SIZE };
+float dist(float x1, float y1, float x2, float y2) {
+    return std::sqrt((x2 - x1)*(x2 - x1)+(y2 - y1)*(y2 - y1));
 }
 
-void drawGrid(SDL_Renderer* renderer) {
-    SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
-    for (int x = 0; x < SCREEN_WIDTH - SIDEBAR_WIDTH; x += GRID_SIZE)
-        SDL_RenderDrawLine(renderer, x, 0, x, SCREEN_HEIGHT);
-    for (int y = 0; y < SCREEN_HEIGHT; y += GRID_SIZE)
-        SDL_RenderDrawLine(renderer, 0, y, SCREEN_WIDTH - SIDEBAR_WIDTH, y);
+bool nearFirstVertex(float x, float y) {
+    if (currentVertices.empty()) return false;
+    auto &v = currentVertices[0];
+    return dist(x,y,v.x,v.y) < CLOSE_DIST;
 }
 
-void drawText(SDL_Renderer* renderer, TTF_Font* font, const std::string& text, int x, int y) {
-    SDL_Color color = {255, 255, 255};
-    SDL_Surface* surface = TTF_RenderText_Solid(font, text.c_str(), color);
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    SDL_Rect dst = {x, y, surface->w, surface->h};
-    SDL_RenderCopy(renderer, texture, nullptr, &dst);
-    SDL_FreeSurface(surface);
-    SDL_DestroyTexture(texture);
-}
-
-void drawSidebar(SDL_Renderer* renderer, TTF_Font* font) {
-    SDL_Rect sidebar = {SCREEN_WIDTH - SIDEBAR_WIDTH, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT};
-    SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
-    SDL_RenderFillRect(renderer, &sidebar);
-
-    std::stringstream floorText, ceilingText;
-    floorText << "Floor: " << std::fixed << std::setprecision(1) << newFloorHeight;
-    ceilingText << "Ceiling: " << std::fixed << std::setprecision(1) << newCeilingHeight;
-
-    drawText(renderer, font, floorText.str(), SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 20);
-    drawText(renderer, font, ceilingText.str(), SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 50);
-
-    drawText(renderer, font, "[Up/Down] Floor", SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 100);
-    drawText(renderer, font, "[Right/Left] Ceiling", SCREEN_WIDTH - SIDEBAR_WIDTH + 10, 130);
-}
-
-
-void drawWalls(SDL_Renderer* renderer, const std::vector<Wall>& walls) {
-    for (const Wall& wall : walls) {
-        if (wall.isPortal) {
-            SDL_SetRenderDrawColor(renderer, 0, 128, 255, 255); // Blue portals
-        } else {
-            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255); // White normal walls
-        }
-        SDL_RenderDrawLine(renderer, wall.p1.x, wall.p1.y, wall.p2.x, wall.p2.y);
-    }
-}
-
-void drawCurrent(SDL_Renderer* renderer) {
-    if (currentWallPoints.size() < 2) return;
-    SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
-    for (size_t i = 0; i < currentWallPoints.size() - 1; ++i) {
-        SDL_RenderDrawLine(renderer,
-                           currentWallPoints[i].x, currentWallPoints[i].y,
-                           currentWallPoints[i + 1].x, currentWallPoints[i + 1].y);
-    }
-}
-
-bool wallsExactlyMatch(const Wall& a, const Wall& b) {
-    return (a.p1.x == b.p1.x && a.p1.y == b.p1.y && a.p2.x == b.p2.x && a.p2.y == b.p2.y) ||
-           (a.p1.x == b.p2.x && a.p1.y == b.p2.y && a.p2.x == b.p1.x && a.p2.y == b.p1.y);
-}
-
-
-const float GRID_TO_REAL_SCALE = 0.5f;  // adjust this to desired real size per grid
-
-void saveMap(const std::string& filename) {
-    std::ofstream out(filename);
-    if (!out) {
-        std::cerr << "Failed to save map to " << filename << "\n";
-        return;
-    }
-
-    for (size_t i = 0; i < sectors.size(); ++i) {
-        const Sector& sec = sectors[i];
-        out << i << " " << sec.walls.size() << " "
-            << sec.floorHeight << " " << sec.ceilingHeight << "\n";
-
-        for (const Wall& wall : sec.walls) {
-            out << (wall.p1.x / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
-                << (wall.p1.y / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
-                << (wall.p2.x / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
-                << (wall.p2.y / GRID_SIZE) * GRID_TO_REAL_SCALE << " "
-                << wall.isPortal << " "
-                << wall.adjoiningSector << "\n";
-        }
-        out << "\n";
-    }
-
-    std::cout << "Map saved to " << filename << "\n";
-}
-
-
-bool loadMap(const char* filename) {
-    std::ifstream in(filename);
-    if (!in) {
-        std::cerr << "Failed to open map file: " << filename << "\n";
-        return false;
-    }
-
-    sectors.clear();
-
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-
-        std::istringstream header(line);
-        int sectorID, wallCount;
-        float floorH, ceilH;
-        if (!(header >> sectorID >> wallCount >> floorH >> ceilH)) {
-            std::cerr << "Malformed sector header: " << line << "\n";
-            return false;
-        }
-
-        Sector sector;
-        sector.floorHeight = floorH;
-        sector.ceilingHeight = ceilH;
-
-        for (int i = 0; i < wallCount; ++i) {
-            if (!std::getline(in, line)) {
-                std::cerr << "Unexpected EOF reading walls\n";
-                return false;
-            }
-            std::istringstream wallLine(line);
-            float x1f, y1f, x2f, y2f;
-            int isPortalInt, adjoiningSector;
-            if (!(wallLine >> x1f >> y1f >> x2f >> y2f >> isPortalInt >> adjoiningSector)) {
-                std::cerr << "Malformed wall line: " << line << "\n";
-                return false;
-            }
-            Wall w;
-            w.p1 = { static_cast<int>((x1f / GRID_TO_REAL_SCALE) * GRID_SIZE),
-                     static_cast<int>((y1f / GRID_TO_REAL_SCALE) * GRID_SIZE) };
-            w.p2 = { static_cast<int>((x2f / GRID_TO_REAL_SCALE) * GRID_SIZE),
-                     static_cast<int>((y2f / GRID_TO_REAL_SCALE) * GRID_SIZE) };
-            w.isPortal = (isPortalInt != 0);
-            w.adjoiningSector = adjoiningSector;
-            sector.walls.push_back(w);
-        }
-        sectors.push_back(sector);
-
-        std::getline(in, line); // blank line between sectors
-    }
-
-    std::cout << "Loaded map from " << filename << " with " << sectors.size() << " sectors.\n";
-    currentMapFilename = filename;  // Save loaded filename for later save
-    return true;
-}
-float distanceToSegment(Point p, Point v, Point w) {
-    float l2 = std::pow(w.x - v.x, 2) + std::pow(w.y - v.y, 2);
-    if (l2 == 0.0f) return std::hypot(p.x - v.x, p.y - v.y);
-
-    float t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
-    t = std::max(0.0f, std::min(1.0f, t));
-    float projX = v.x + t * (w.x - v.x);
-    float projY = v.y + t * (w.y - v.y);
-    return std::hypot(p.x - projX, p.y - projY);
-}
-
-struct WallRef {
-    Wall* wall;
-    int sectorIndex;
-};
-
-WallRef findWallAt(int x, int y) {
-    Point p = {x, y};
-    for (size_t i = 0; i < sectors.size(); ++i) {
-        Sector& sector = sectors[i];
-        for (Wall& wall : sector.walls) {
-            if (distanceToSegment(p, wall.p1, wall.p2) < HIT_RADIUS) {
-                return { &wall, static_cast<int>(i) };
+void drawCircle(SDL_Renderer* rend, int x, int y, int radius) {
+    for (int w = 0; w < radius*2; w++) {
+        for (int h = 0; h < radius*2; h++) {
+            int dx = radius - w;
+            int dy = radius - h;
+            if (dx*dx + dy*dy <= radius*radius) {
+                SDL_RenderDrawPoint(rend, x + dx, y + dy);
             }
         }
     }
-    return { nullptr, -1 };
 }
 
-float cross(const Point& a, const Point& b, const Point& c) {
-    return (b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x);
+void drawLine(SDL_Renderer* rend, SDL_FPoint a, SDL_FPoint b, bool portal = false) {
+    if (portal) {
+        const int dashLen = 5;
+        float dx = b.x - a.x;
+        float dy = b.y - a.y;
+        float length = std::sqrt(dx*dx + dy*dy);
+        float dashCount = length / (dashLen * 2);
+        float dashX = dx / (dashCount * 2);
+        float dashY = dy / (dashCount * 2);
+        float startX = a.x;
+        float startY = a.y;
+        for (int i = 0; i < dashCount; ++i) {
+            SDL_RenderDrawLine(rend, (int)startX, (int)startY, (int)(startX + dashX), (int)(startY + dashY));
+            startX += dashX * 2;
+            startY += dashY * 2;
+        }
+    } else {
+        SDL_RenderDrawLine(rend, (int)a.x, (int)a.y, (int)b.x, (int)b.y);
+    }
 }
 
-bool segmentsOverlap(const Point& p1, const Point& q1, const Point& p2, const Point& q2) {
-    if (std::abs(cross(p1, q1, p2)) > 0.1f) return false;
-    if (std::abs(cross(p1, q1, q2)) > 0.1f) return false;
-
-    bool xOverlap = !(std::max(p1.x, q1.x) < std::min(p2.x, q2.x) || std::min(p1.x, q1.x) > std::max(p2.x, q2.x));
-    bool yOverlap = !(std::max(p1.y, q1.y) < std::min(p2.y, q2.y) || std::min(p1.y, q1.y) > std::max(p2.y, q2.y));
-
-    return xOverlap && yOverlap;
+void outputMap() {
+    printf("# sector_id wall_count floor_height ceiling_height\n");
+    for (auto &sec : sectors) {
+        printf("%d %lu %.2f %.2f\n", sec.id, sec.walls.size(), sec.floor_height, sec.ceiling_height);
+        for (auto &w : sec.walls) {
+            printf("%.2f %.2f %.2f %.2f %d %d\n", w.x1, w.y1, w.x2, w.y2, w.isPortal?1:0, w.adjoiningSector);
+        }
+    }
 }
 
-void tryAutoLinkPortal(Wall* wall, int sectorIndex) {
-    Sector& currentSector = sectors[sectorIndex];
+SDL_Texture* renderText(const std::string &message, SDL_Color color) {
+    SDL_Surface* surf = TTF_RenderUTF8_Blended(font, message.c_str(), color);
+    if (!surf) {
+        printf("TTF_RenderUTF8_Blended Error: %s\n", TTF_GetError());
+        return nullptr;
+    }
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_FreeSurface(surf);
+    return texture;
+}
 
-    for (size_t i = 0; i < sectors.size(); ++i) {
-        if (i == sectorIndex) continue;
+void drawText(const std::string &msg, int x, int y) {
+    SDL_Color white = {255,255,255,255};
+    SDL_Texture* textTex = renderText(msg, white);
+    if (!textTex) return;
+    int w, h;
+    SDL_QueryTexture(textTex, NULL, NULL, &w, &h);
+    SDL_Rect dst = {x,y,w,h};
+    SDL_RenderCopy(renderer, textTex, NULL, &dst);
+    SDL_DestroyTexture(textTex);
+}
 
-        Sector& otherSector = sectors[i];
+// New helper: snap a value to the nearest GRID_SIZE multiple
+float snapToGrid(float val, float gridSize) {
+    return std::round(val / gridSize) * gridSize;
+}
 
-        for (size_t j = 0; j < otherSector.walls.size(); ++j) {
-            Wall& otherWall = otherSector.walls[j];
+// Snap an SDL_FPoint to the grid
+SDL_FPoint snapVertexToGrid(const SDL_FPoint& v, float gridSize) {
+    return { snapToGrid(v.x, gridSize), snapToGrid(v.y, gridSize) };
+}
 
-            if (otherWall.isPortal) continue;
+// Snap new vertex to existing sector vertices if close enough, returns snapped position
+SDL_FPoint snapToExistingVertices(float x, float y) {
+    for (auto &sec : sectors) {
+        for (auto &w : sec.walls) {
+            SDL_FPoint v1 = snapVertexToGrid({w.x1, w.y1}, GRID_SIZE);
+            SDL_FPoint v2 = snapVertexToGrid({w.x2, w.y2}, GRID_SIZE);
+            SDL_FPoint p = snapVertexToGrid({x,y}, GRID_SIZE);
+            if (dist(p.x, p.y, v1.x, v1.y) < SNAP_DIST) return v1;
+            if (dist(p.x, p.y, v2.x, v2.y) < SNAP_DIST) return v2;
+        }
+    }
+    return snapVertexToGrid({x,y}, GRID_SIZE);
+}
 
-            // Check for overlap
-            if (segmentsOverlap(wall->p1, wall->p2, otherWall.p1, otherWall.p2)) {
-                // Determine overlapping segment
-                Point a1 = wall->p1, a2 = wall->p2;
-                Point b1 = otherWall.p1, b2 = otherWall.p2;
+// Link portals between new sector walls and existing sector walls, removing duplicates
+void linkPortals(Sector& newSector) {
+    std::vector<size_t> wallsToRemove;
 
-                // Normalize to same direction for consistent math
-                if (a1.x > a2.x || (a1.x == a2.x && a1.y > a2.y)) std::swap(a1, a2);
-                if (b1.x > b2.x || (b1.x == b2.x && b1.y > b2.y)) std::swap(b1, b2);
+    for (auto &sec : sectors) {
+        if (sec.id == newSector.id) continue;
+        for (size_t i = 0; i < newSector.walls.size(); ++i) {
+            Wall &newWall = newSector.walls[i];
+            for (size_t j = 0; j < sec.walls.size(); ++j) {
+                Wall &existWall = sec.walls[j];
 
-                Point overlapStart = { std::max(a1.x, b1.x), std::max(a1.y, b1.y) };
-                Point overlapEnd   = { std::min(a2.x, b2.x), std::min(a2.y, b2.y) };
+                // Snap all endpoints to grid
+                SDL_FPoint nw1 = snapVertexToGrid({newWall.x1, newWall.y1}, GRID_SIZE);
+                SDL_FPoint nw2 = snapVertexToGrid({newWall.x2, newWall.y2}, GRID_SIZE);
+                SDL_FPoint ew1 = snapVertexToGrid({existWall.x1, existWall.y1}, GRID_SIZE);
+                SDL_FPoint ew2 = snapVertexToGrid({existWall.x2, existWall.y2}, GRID_SIZE);
 
-                // Reconstruct wall into new segments
-                std::vector<Wall> newWalls;
-                if (!(a1.x == overlapStart.x && a1.y == overlapStart.y))
-                    newWalls.push_back({ a1, overlapStart, false, -1 });
-                newWalls.push_back({ overlapStart, overlapEnd, true, (int)i });
-                if (!(a2.x == overlapEnd.x && a2.y == overlapEnd.y))
-                    newWalls.push_back({ overlapEnd, a2, false, -1 });
+                // Check if walls share the same segment (order-independent)
+                bool sameSegment = 
+                    ((fabs(nw1.x - ew1.x) < 0.001f && fabs(nw1.y - ew1.y) < 0.001f &&
+                      fabs(nw2.x - ew2.x) < 0.001f && fabs(nw2.y - ew2.y) < 0.001f) ||
+                     (fabs(nw1.x - ew2.x) < 0.001f && fabs(nw1.y - ew2.y) < 0.001f &&
+                      fabs(nw2.x - ew1.x) < 0.001f && fabs(nw2.y - ew1.y) < 0.001f));
 
-                // Replace wall in current sector
-                for (size_t k = 0; k < currentSector.walls.size(); ++k) {
-                    if (&currentSector.walls[k] == wall) {
-                        currentSector.walls.erase(currentSector.walls.begin() + k);
-                        currentSector.walls.insert(currentSector.walls.begin() + k, newWalls.begin(), newWalls.end());
-                        break;
-                    }
+                if (sameSegment) {
+                    existWall.isPortal = true;
+                    existWall.adjoiningSector = newSector.id;
+
+                    newWall.isPortal = true;
+                    newWall.adjoiningSector = sec.id;
+
+                    wallsToRemove.push_back(i);
                 }
-
-                // Reconstruct other wall
-                std::vector<Wall> newOtherWalls;
-                if (!(b1.x == overlapStart.x && b1.y == overlapStart.y))
-                    newOtherWalls.push_back({ b1, overlapStart, false, -1 });
-                newOtherWalls.push_back({ overlapStart, overlapEnd, true, sectorIndex });
-                if (!(b2.x == overlapEnd.x && b2.y == overlapEnd.y))
-                    newOtherWalls.push_back({ overlapEnd, b2, false, -1 });
-
-                // Replace other wall in other sector
-                otherSector.walls.erase(otherSector.walls.begin() + j);
-                otherSector.walls.insert(otherSector.walls.begin() + j, newOtherWalls.begin(), newOtherWalls.end());
-
-                std::cout << "Auto-linked portal between sector " << sectorIndex << " and " << i << "\n";
-                return;
             }
         }
+    }
+
+    // Remove duplicates from newSector in reverse order
+    std::sort(wallsToRemove.begin(), wallsToRemove.end(), std::greater<size_t>());
+    for (size_t idx : wallsToRemove) {
+        newSector.walls.erase(newSector.walls.begin() + idx);
     }
 }
 
-   
-// Find which sector is hovered by mouse (close to any wall)
-int findHoveredSector(int mx, int my) {
-    Point mouseP = {mx, my};
-    for (size_t i = 0; i < sectors.size(); ++i) {
-        const Sector& sec = sectors[i];
-        for (const Wall& w : sec.walls) {
-            if (distanceToSegment(mouseP, w.p1, w.p2) < HIT_RADIUS) {
-                return (int)i;
-            }
-        }
-    }
-    return -1;
-}
 
-void deleteSector(int sectorIndex) {
-    if (sectorIndex < 0 || sectorIndex >= (int)sectors.size()) return;
-
-    // Remove all portals in other sectors that link to this sector
-    for (Sector& sec : sectors) {
-        for (Wall& w : sec.walls) {
-            if (w.isPortal && w.adjoiningSector == sectorIndex) {
-                w.isPortal = false;
-                w.adjoiningSector = -1;
-            } else if (w.isPortal && w.adjoiningSector > sectorIndex) {
-                // Shift sector indexes down by one due to removal
-                w.adjoiningSector--;
-            }
-        }
-    }
-
-    // Remove the sector
-    sectors.erase(sectors.begin() + sectorIndex);
-
-    // Fix all portals with adjoiningSector indexes higher than removed sector
-    for (Sector& sec : sectors) {
-        for (Wall& w : sec.walls) {
-            if (w.isPortal && w.adjoiningSector > sectorIndex) {
-                w.adjoiningSector--;
-            }
-        }
-    }
-
-    std::cout << "Deleted sector " << sectorIndex << "\n";
-}
-
-int main(int argc, char* argv[]) {
+int main(int argc, char** argv) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        std::cerr << "SDL_Init error: " << SDL_GetError() << std::endl;
+        printf("SDL_Init Error: %s\n", SDL_GetError());
         return 1;
     }
-
     if (TTF_Init() != 0) {
-        std::cerr << "TTF_Init error: " << TTF_GetError() << std::endl;
+        printf("TTF_Init Error: %s\n", TTF_GetError());
         SDL_Quit();
         return 1;
     }
 
-    SDL_Window* window = SDL_CreateWindow("Grid Map Editor",
-                                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                          SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+    window = SDL_CreateWindow("Doom-style Sector Editor (SDL2 Software Render + UI + Grid Snap)", 100, 100, WINDOW_W, WINDOW_H, SDL_WINDOW_SHOWN);
     if (!window) {
-        std::cerr << "SDL_CreateWindow error: " << SDL_GetError() << std::endl;
+        printf("SDL_CreateWindow Error: %s\n", SDL_GetError());
         TTF_Quit();
         SDL_Quit();
         return 1;
     }
-
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
-        std::cerr << "SDL_CreateRenderer error: " << SDL_GetError() << std::endl;
+        printf("SDL_CreateRenderer Error: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
         TTF_Quit();
         SDL_Quit();
         return 1;
     }
 
-    TTF_Font* font = TTF_OpenFont("DejaVuSans.ttf", 16);
+    font = TTF_OpenFont("monospace.ttf", 16);
     if (!font) {
-        std::cerr << "Failed to load font: " << TTF_GetError() << std::endl;
+        printf("Failed to load font: %s\n", TTF_GetError());
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         TTF_Quit();
@@ -379,112 +215,109 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (argc >= 2) {
-        if (!loadMap(argv[1])) {
-            std::cerr << "Failed to load map. Starting empty editor.\n";
-        }
-    }
+    bool quit = false;
+    bool sectorClosed = false;
 
-    bool running = true;
-    SDL_Event event;
+    while (!quit) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            switch(e.type) {
+                case SDL_QUIT:
+                    quit = true;
+                    break;
 
-    while (running) {
-        while (SDL_PollEvent(&event)) {
-            switch (event.type) {
-            case SDL_QUIT:
-                running = false;
-                break;
+                case SDL_MOUSEBUTTONDOWN: {
+                    int mx = e.button.x;
+                    int my = e.button.y;
 
-            case SDL_MOUSEBUTTONDOWN:
-                if (event.button.x < SCREEN_WIDTH - SIDEBAR_WIDTH) {
-                    if (event.button.button == SDL_BUTTON_LEFT) {
-                        SDL_Point snapped = gridSnap(event.button.x, event.button.y);
-                        currentWallPoints.push_back({snapped.x, snapped.y});
-                    } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                        WallRef ref = findWallAt(event.button.x, event.button.y);
-                        if (ref.wall) {
-                            if (!ref.wall->isPortal) {
-                                ref.wall->isPortal = true;
-                                tryAutoLinkPortal(ref.wall, ref.sectorIndex);
-                            } else {
-                                int linkedSector = ref.wall->adjoiningSector;
-                                if (linkedSector >= 0 && linkedSector < (int)sectors.size()) {
-                                    Sector& linkedSec = sectors[linkedSector];
-                                    for (Wall& w : linkedSec.walls) {
-                                        if (w.adjoiningSector == ref.sectorIndex && w.isPortal) {
-                                            w.isPortal = false;
-                                            w.adjoiningSector = -1;
-                                        }
-                                    }
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        if (!sectorClosed) {
+                            if (nearFirstVertex(mx,my) && currentVertices.size() >= 3) {
+                                // Snap all current vertices to existing and to grid
+                                for (auto &v : currentVertices) {
+                                    SDL_FPoint snapped = snapToExistingVertices(v.x, v.y);
+                                    v = snapped;
                                 }
-                                ref.wall->isPortal = false;
-                                ref.wall->adjoiningSector = -1;
-                                std::cout << "Portal unset on both sides.\n";
-                            }
-                        }
-                    }
-                }
-                break;
 
-            case SDL_KEYDOWN:
-                switch (event.key.keysym.sym) {
-                case SDLK_RETURN:
-                    if (currentWallPoints.size() > 2) {
-                        Sector newSector;
-                        newSector.floorHeight = newFloorHeight;
-                        newSector.ceilingHeight = newCeilingHeight;
-                        for (size_t i = 0; i < currentWallPoints.size(); ++i) {
-                            Point p1 = currentWallPoints[i];
-                            Point p2 = currentWallPoints[(i + 1) % currentWallPoints.size()];
-                            newSector.walls.push_back({p1, p2});
-                        }
-                        sectors.push_back(newSector);
-                        currentWallPoints.clear();
-                        std::cout << "Sector created. Total sectors: " << sectors.size() << "\n";
-                    }
-                    break;
-                case SDLK_s:
-                    saveMap(currentMapFilename);
-                    break;
-                case SDLK_ESCAPE:
-                    running = false;
-                    break;
-                case SDLK_UP:
-                    newFloorHeight += 0.5f;
-                    break;
-                case SDLK_DOWN:
-                    newFloorHeight -= 0.5f;
-                    break;
-                case SDLK_RIGHT:
-                    newCeilingHeight += 0.5f;
-                    break;
-                case SDLK_LEFT:
-                    newCeilingHeight -= 0.5f;
-                    break;
-                case SDLK_d: {
-                    int mx, my;
-                    SDL_GetMouseState(&mx, &my);
-                    if (mx < SCREEN_WIDTH - SIDEBAR_WIDTH) {
-                        int hovered = findHoveredSector(mx, my);
-                        if (hovered >= 0) {
-                            deleteSector(hovered);
+                                Sector sec;
+                                sec.id = currentSectorId++;
+                                sec.floor_height = 0.0f;
+                                sec.ceiling_height = 4.0f;
+                                // Create walls from vertices
+                                for (size_t i = 0; i < currentVertices.size(); ++i) {
+                                    size_t next = (i + 1) % currentVertices.size();
+                                    Wall w;
+                                    w.x1 = currentVertices[i].x;
+                                    w.y1 = currentVertices[i].y;
+                                    w.x2 = currentVertices[next].x;
+                                    w.y2 = currentVertices[next].y;
+                                    w.isPortal = false;
+                                    w.adjoiningSector = -1;
+                                    sec.walls.push_back(w);
+                                }
+
+                                linkPortals(sec);
+
+                                sectors.push_back(sec);
+                                currentVertices.clear();
+                                sectorClosed = true;
+                            } else {
+                                // Snap the new vertex to grid and existing vertices
+                                SDL_FPoint snapped = snapToExistingVertices((float)mx, (float)my);
+                                currentVertices.push_back(snapped);
+                            }
+                        } else {
+                            // Start new sector
+                            sectorClosed = false;
+                            currentVertices.clear();
+                            SDL_FPoint snapped = snapToExistingVertices((float)mx, (float)my);
+                            currentVertices.push_back(snapped);
                         }
                     }
+                } break;
+
+                case SDL_KEYDOWN:
+                    if (e.key.keysym.sym == SDLK_RETURN) {
+                        outputMap();
+                    }
                     break;
-                }
-                }
-                break;
             }
         }
 
-        SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
-        drawGrid(renderer);
-        for (const Sector& s : sectors)
-            drawWalls(renderer, s.walls);
-        drawCurrent(renderer);
-        drawSidebar(renderer, font);
+        // Draw existing sectors
+        for (auto &sec : sectors) {
+            for (auto &w : sec.walls) {
+                SDL_SetRenderDrawColor(renderer, w.isPortal ? 0 : 255, w.isPortal ? 255 : 255, 0, 255);
+                drawLine(renderer, {w.x1, w.y1}, {w.x2, w.y2}, w.isPortal);
+            }
+        }
+
+        // Draw current unfinished sector lines and points
+        if (!currentVertices.empty()) {
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            for (size_t i = 0; i < currentVertices.size(); ++i) {
+                SDL_FPoint v = currentVertices[i];
+                drawCircle(renderer, (int)v.x, (int)v.y, (int)VERTEX_RADIUS);
+                if (i > 0) {
+                    drawLine(renderer, currentVertices[i-1], v);
+                }
+            }
+            // Draw line from last to mouse pos for preview if sector not closed
+            int mx, my;
+            SDL_GetMouseState(&mx, &my);
+            if (!sectorClosed) {
+                drawLine(renderer, currentVertices.back(), { (float)mx, (float)my });
+            }
+        }
+
+        // Simple UI text
+        drawText("Left Click: Add vertex / Close sector (click near start)", 5, 5);
+        drawText("Enter: Output map data to console", 5, 25);
+        drawText("Vertices snap to a 5px grid for portal alignment", 5, 45);
+        drawText("Sectors: " + std::to_string(sectors.size()), 5, 65);
 
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
@@ -498,4 +331,4 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
- 
+
